@@ -1,0 +1,71 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Template for the workload account deploying an EventBridge rule and the IAM role for cross account events.'
+
+Parameters:
+  BackupManagementAccountID:
+    Type: String
+    Description: 'AWS Account ID of the backup management account.'
+    AllowedPattern: '^[0-9]{12}$'
+  
+  CentralEventBusName:
+    Type: String
+    Description: 'Name of the target event bus in the backup management account.'
+    Default: 'default'
+
+  BackupRuleName:
+    Type: String
+    Description: 'Name of the EventBridge Rule that will forward Backup events.'
+    Default: 'backup-events-cross-account-rule'
+
+Resources:
+  # EventBridge rule to match AWS Backup events
+  BackupEventsRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Description: 'Capture all AWS Backup events and send to the backup management account'
+      EventPattern:
+        source:
+          - aws.backup
+      Name: !Ref BackupRuleName
+      State: 'ENABLED'
+      EventBusName: 'default'
+      Targets: 
+        - Arn: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${BackupManagementAccountID}:event-bus/${CentralEventBusName}'
+          Id: 'SendToTargetEventBus'
+          RoleArn: !GetAtt EventBridgeRole.Arn
+
+  # IAM Role for EventBridge
+  EventBridgeRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: 'sts:AssumeRole'
+  
+  # EventBridge IAM Policy to put events on the target bus
+  EventBridgePolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      Description: IAM policy for EventBridge Rule to put events to a cross-account event bus.
+      Path: /
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: 'events:PutEvents'
+            Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${BackupManagementAccountID}:event-bus/${CentralEventBusName}'
+      Roles:
+        - !Ref EventBridgeRole
+
+
+Outputs:
+  RuleArn:
+    Description: 'ARN of the EventBridge Rule'
+    Value: !GetAtt BackupEventsRule.Arn
+  RoleName:
+    Description: 'Name of the IAM Role'
+    Value: !Ref EventBridgeRole

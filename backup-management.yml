@@ -1,0 +1,159 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Template for the backup management account deploying a custom event bus and SNS topic.'
+
+Parameters:
+  EventBusName:
+    Type: String
+    Description: 'Name for the custom Amazon EventBridge event bus.'
+    Default: CentralBackupEventBus
+  OrgID:
+    Type: String
+    Description: 'AWS Organization ID used to limit access to the custom event bus.'
+    AllowedPattern: 'o-[a-z0-9]{10,32}'
+  SNSTopicName:
+    Type: String
+    Description: 'Name for the SNS topic used to send event notifications.'
+    Default: 'backup-events-topic'
+
+Resources:
+  # KMS Key for SNS encryption
+  BackupEventsKMSKey:
+    Type: 'AWS::KMS::Key'
+    Properties:
+      Description: 'KMS key for encrypting SNS messages from Backup events'
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: 'Allow EventBridge to use the key'
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action:
+              - 'kms:GenerateDataKey*'
+              - 'kms:Decrypt'
+            Resource: !GetAtt EventBridgeRole.Arn
+          - Sid: 'Allow SNS to use the key'
+            Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action:
+              - 'kms:GenerateDataKey*'
+              - 'kms:Decrypt'
+            Resource: !Sub 'arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:${SNSTopicName}'
+          - Sid: 'Enable IAM User Permissions'
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+
+  # KMS Key Alias
+  BackupEventsKMSKeyAlias:
+    Type: 'AWS::KMS::Alias'
+    Properties:
+      AliasName: 'alias/backup-events-key'
+      TargetKeyId: !Ref BackupEventsKMSKey
+
+  # SNS Topic with KMS encryption
+  BackupEventsTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      KmsMasterKeyId: !Ref BackupEventsKMSKey
+      TopicName: !Ref SNSTopicName
+
+  # IAM Role for EventBridge
+  EventBridgeRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: 'sts:AssumeRole'
+  
+  # IAM Policy to allow EventBridge to send backup events to the SNS topic
+  EventBridgePolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      Description: IAM policy to allow EventBridge to publish to the backup events SNS topic. 
+      Path: /
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: 'sns:Publish'
+            Resource: !Ref BackupEventsTopic
+          - Effect: Allow
+            Action:
+              - 'kms:GenerateDataKey*'
+              - 'kms:Decrypt'
+            Resource: !GetAtt BackupEventsKMSKey.Arn
+      Roles:
+        - !Ref EventBridgeRole
+
+  # EventBridge Rule for Backup Events
+  BackupEventsRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Description: 'Capture all AWS Backup events'
+      EventBusName: !GetAtt BackupEventBus.Arn
+      EventPattern:
+        source:
+          - aws.backup
+      Name: 'backup-events-rule'
+      State: 'ENABLED'
+      Targets: 
+        - Arn: !Ref BackupEventsTopic
+          Id: 'SendToSNS'
+          RoleArn: !GetAtt EventBridgeRole.Arn
+  
+  # EventBridge event bus to collect backup events
+  BackupEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Ref EventBusName 
+
+  # Resource policy for event bus to allow events from all Organization memebers
+  BackupEventBusPolicy:
+    Type: AWS::Events::EventBusPolicy
+    Properties:
+      EventBusName: !Ref EventBusName
+      StatementId: "AllowOrgAccountToPutEvents"
+      Statement:
+        Effect: "Allow"
+        Principal: "*"
+        Action: "events:PutEvents"
+        Resource: !GetAtt BackupEventBus.Arn
+        Condition:
+          StringEquals:
+            "aws:PrincipalOrgID": !Ref OrgID
+
+  # SNS Topic resource policy to allow EventBridge Rule events
+  BackupEventsTopicPolicy:
+    Type: 'AWS::SNS::TopicPolicy'
+    Properties:
+      Topics:
+        - !Ref BackupEventsTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: 'Allow EventBridge to publish to SNS topic'
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: 'sns:Publish'
+            Resource: !Ref BackupEventsTopic
+
+Outputs:
+  TopicArn:
+    Description: 'ARN of the SNS Topic'
+    Value: !Ref BackupEventsTopic
+  KMSKeyArn:
+    Description: 'ARN of the KMS Key'
+    Value: !GetAtt BackupEventsKMSKey.Arn
+  RuleName:
+    Description: 'Name of the EventBridge Rule'
+    Value: !Ref BackupEventsRule
